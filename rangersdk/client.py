@@ -5,6 +5,31 @@ import requests
 from rangersdk.dslclient.dsl_sign import sign
 
 
+class ValidateSession(requests.Session):
+    def __init__(self, ak, sk, expiration, service_url, params):
+        super().__init__()
+        self.__ak = ak
+        self.__sk = sk
+        self.__expiration = expiration
+        self.__service_url = service_url
+        self.__params = params
+
+    def prepare_request(self, request):
+        p = super(ValidateSession, self).prepare_request(request)
+        if p.body is None:
+            validate_body = None
+        elif isinstance(p.body, str):
+            validate_body = p.body
+        elif isinstance(p.body, bytes):
+            validate_body = p.body.decode("utf-8")
+        else:
+            raise Exception("invalid body")
+        authorization = sign(self.__ak, self.__sk, self.__expiration, p.method, self.__service_url,
+                             self.__params, validate_body)
+        p.headers.update({"authorization": authorization})
+        return p
+
+
 class RangerClient(object):
     def __init__(self, org, ak, sk, expiration=None, url=None):
         if url:
@@ -27,13 +52,13 @@ class RangerClient(object):
             'data_profile': '/dataprofile',
         }
 
-    def _request_service(self, service, method, path, headers, params, body):
+    def _request_service(self, service, method, path, headers, params, body, files=None):
         service_path = self.__services.get(service)
         if not service_path:
             raise ClientException('service: {} not exist'.format(service))
 
         service_url = service_path + path
-        return self._request(method, service_url, headers, params, body)
+        return self._request(method, service_url, headers, params, body, files)
 
     @staticmethod
     def parse_params(params):
@@ -52,7 +77,17 @@ class RangerClient(object):
                 method = 'GET'
         return method
 
-    def _request(self, method, service_url, headers, params, body):
+    def _request(self, method, service_url, headers, params, body, files):
+        method = method.upper()
+        if method not in ["POST", "GET", "DELETE", "PUT", "PATCH"]:
+            raise ClientException('unSupport method: {}'.format(method))
+
+        r_headers = {}
+        if headers is not None:
+            r_headers.update(headers)
+        elif files is None:
+            r_headers['Content-Type'] = 'application/json'
+
         if body is not None:
             if hasattr(body, "toJSON"):
                 body = body.toJSON()
@@ -62,25 +97,14 @@ class RangerClient(object):
                 pass
             else:
                 raise ClientException('body must have toJSON or be dict or be str')
-        method = method.upper()
-        if method not in ["POST", "GET", "DELETE", "PUT", "PATCH"]:
-            raise ClientException('unSupport method: {}'.format(method))
-        if 'POST' == method:
-            if body is None:
-                raise ClientException('post must have body')
 
-        authorization = sign(self.__ak, self.__sk, self.__expiration, method, service_url, params, body)
-        r_headers = {'Authorization': authorization}
-        if headers:
-            r_headers.update(headers)
-        elif 'POST' == method:
-            r_headers['Content-Type'] = 'application/json'
         url = self.__url + service_url + ("?{}".format(RangersClient.parse_params(params)) if params else "")
-        return requests.request(method=method, url=url, data=body, headers=r_headers)
+        return ValidateSession(self.__ak, self.__sk, self.__expiration, service_url, params).request(method=method,url=url, data=body,
+                                                                                                     headers=r_headers,files=files)
 
     def request(self, service_url, **kwargs):
         return self._request(RangersClient._parse_method(**kwargs), service_url, kwargs.get('headers'),
-                                     kwargs.get('params'), kwargs.get('body'))
+                             kwargs.get('params'), kwargs.get('body'), kwargs.get('files'))
 
     def data_finder(self, path, **kwargs):
         return self._request_service('data_finder', RangersClient._parse_method(**kwargs), path, kwargs.get('headers'),
